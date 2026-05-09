@@ -1,0 +1,27 @@
+# Build artifacts
+build/
+cpp/generated/
+python/generated/
+**/__pycache__/
+*.pyc
+*.pyo
+
+# Generated data
+data/partitions/*.csv
+dataset/
+experiments/metrics_output/*.csv
+experiments/logs/
+
+# Local Mini 1 reference (kept locally, not part of this repo)
+275_project/
+
+# Editor / OS
+.DS_Store
+**/.DS_Store
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Claude Code session state (local only)
+.claude/

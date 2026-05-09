@@ -1,0 +1,163 @@
+syntax = "proto3";
+
+package mini2;
+
+service Mini2Service {
+  // External client → A only.
+  rpc SubmitQuery(QueryRequest) returns (QueryAccepted);
+  rpc FetchChunk(ChunkFetchRequest) returns (ChunkResponse);
+  rpc CancelQuery(CancelRequest) returns (CancelAck);
+
+  // Internal peer-to-peer.
+  rpc PeerQuery(PeerQueryRequest) returns (PeerQueryAck);
+  rpc PushPeerChunk(PeerChunk) returns (PeerChunkAck);
+  rpc PeerCancel(PeerCancelRequest) returns (PeerCancelAck);
+
+  // Health check.
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatReply);
+}
+
+// ─── Domain record (NYC 311 ServiceRequest) ──────────────────────────────────
+
+message ServiceRequest {
+  int64  unique_key = 1;
+  int64  created_date = 2;             // epoch seconds
+  int64  closed_date = 3;
+  int64  due_date = 4;
+  int64  resolution_updated_date = 5;
+  double latitude = 6;
+  double longitude = 7;
+  int32  incident_zip = 8;
+  int32  x_coordinate = 9;
+  int32  y_coordinate = 10;
+  uint32 borough = 11;                 // enum cast
+  uint32 status = 12;
+  uint32 channel_type = 13;
+  string agency = 14;
+  string complaint_type = 15;
+  string descriptor = 16;
+  string incident_address = 17;
+  string city = 18;
+}
+
+// ─── Filter ─────────────────────────────────────────────────────────────────
+
+message QueryFilter {
+  string field_name = 1;       // e.g. "complaint_type", "borough", "created_date"
+  string op = 2;                // "eq", "between", "gt", "lt", "geo_bbox"
+  string value = 3;             // string operand
+  int64  int_value = 4;
+  double double_value = 5;
+  bool   bool_value = 6;
+  string start = 7;             // range start (string)
+  string end = 8;               // range end (string)
+  int64  start_int = 9;
+  int64  end_int = 10;
+  double lat_min = 11;
+  double lat_max = 12;
+  double lon_min = 13;
+  double lon_max = 14;
+}
+
+// ─── External client RPCs ───────────────────────────────────────────────────
+
+message QueryRequest {
+  string client_id = 1;
+  string query_text = 2;
+  QueryFilter filter = 3;
+  int32  requested_chunk_records = 4;
+  int64  max_chunk_bytes = 5;
+}
+
+message QueryAccepted {
+  string request_id = 1;
+  bool   accepted = 2;
+  string message = 3;
+}
+
+message ChunkFetchRequest {
+  string client_id = 1;
+  string request_id = 2;
+  int32  max_records = 3;
+}
+
+message ChunkResponse {
+  string request_id = 1;
+  int32  chunk_id = 2;
+  repeated ServiceRequest records = 3;
+  bool   done = 4;
+  bool   cancelled = 5;
+  string message = 6;
+}
+
+message CancelRequest {
+  string client_id = 1;
+  string request_id = 2;
+  string reason = 3;
+}
+
+message CancelAck {
+  string request_id = 1;
+  bool   cancelled = 2;
+}
+
+// ─── Internal peer RPCs ─────────────────────────────────────────────────────
+
+message PeerQueryRequest {
+  string request_id = 1;
+  string origin_node = 2;
+  string parent_node = 3;
+  string sender_node = 4;
+  QueryFilter filter = 5;
+  int64  ttl_ms = 6;
+  repeated string visited_nodes = 7;
+  int32  chunk_records = 8;
+  int64  max_chunk_bytes = 9;
+}
+
+message PeerQueryAck {
+  string request_id = 1;
+  string receiver_node = 2;
+  bool   accepted = 3;
+  string message = 4;
+}
+
+message PeerChunk {
+  string request_id = 1;
+  string source_node = 2;
+  string destination_node = 3;
+  int32  chunk_id = 4;
+  repeated ServiceRequest records = 5;
+  bool   source_done = 6;
+  string message = 7;
+}
+
+message PeerChunkAck {
+  string request_id = 1;
+  string receiver_node = 2;
+  bool   accepted = 3;
+}
+
+message PeerCancelRequest {
+  string request_id = 1;
+  string sender_node = 2;
+  string reason = 3;
+}
+
+message PeerCancelAck {
+  string request_id = 1;
+  bool   cancelled = 2;
+}
+
+// ─── Health ─────────────────────────────────────────────────────────────────
+
+message HeartbeatRequest {
+  string node_id = 1;
+  int64  timestamp_ms = 2;
+}
+
+message HeartbeatReply {
+  string node_id = 1;
+  bool   ok = 2;
+  int64  timestamp_ms = 3;
+}
