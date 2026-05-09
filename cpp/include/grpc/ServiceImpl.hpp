@@ -3,6 +3,8 @@
 #include "config/ConfigManager.hpp"
 #include "query/LocalQueryEngine.hpp"
 #include "grpc/ClientPool.hpp"
+#include "scheduler/WorkerPool.hpp"
+#include "scheduler/Scheduler.hpp"
 #include "mini2.grpc.pb.h"
 
 #include <grpcpp/grpcpp.h>
@@ -44,8 +46,17 @@ struct ActiveQuery {
 
 class Mini2ServiceImpl final : public Mini2Service::Service {
 public:
-  Mini2ServiceImpl(const Config& cfg, const LocalQueryEngine& query_engine, GrpcClientPool& client_pool) 
-      : cfg_(cfg), query_engine_(query_engine), client_pool_(client_pool) {}
+  Mini2ServiceImpl(const Config& cfg,
+                   const LocalQueryEngine& query_engine,
+                   GrpcClientPool& client_pool,
+                   WorkerPool& worker_pool,
+                   Scheduler& scheduler)
+      : cfg_(cfg), query_engine_(query_engine), client_pool_(client_pool),
+        worker_pool_(worker_pool), scheduler_(scheduler) {}
+
+  // Called by Scheduler when a request's local result push is exhausted.
+  // Marks local_done and tries to emit source_done upward.
+  void on_scheduler_local_done(const std::string& req_id);
 
   // ─── Health check ─────────────────────────────────────────────────────────
 
@@ -85,6 +96,8 @@ private:
   const Config& cfg_;
   const LocalQueryEngine& query_engine_;
   GrpcClientPool& client_pool_;
+  WorkerPool& worker_pool_;
+  Scheduler& scheduler_;
 
   std::mutex mutex_;
   std::unordered_map<std::string, ActiveQuery> active_queries_;

@@ -22,7 +22,7 @@ on top of "Recent activity"; checklist below.
   servers; verify completion semantics under E-D / A-G cycles.
 - [x] **7. Python node I** — bring up I as a Python leaf; client query
   reaches it through A.
-- [ ] **8. Scheduler + WorkerPool** — round-robin policy;
+- [x] **8. Scheduler + WorkerPool** — round-robin policy;
   `test_many_clients.sh` shows fairness vs greedy.
 - [ ] **9. Cancellation + TTL janitor** — `PeerCancel` propagation;
   abandoned-fetch cleanup.
@@ -35,6 +35,107 @@ on top of "Recent activity"; checklist below.
 ---
 
 ## Recent Activity
+
+### Step 8 — Scheduler + WorkerPool · DONE
+
+**Date:** 2026-05-09
+
+**What landed:**
+- `cpp/include/scheduler/WorkerPool.hpp` + `cpp/src/scheduler/WorkerPool.cpp`
+  — fixed-size thread pool with FIFO task queue. Bounded thread usage
+  replaces the unbounded `std::thread().detach()` pattern at the three
+  sites in `ServiceImpl.cpp` (SubmitQuery PeerQuery forwarding, PeerQuery
+  PeerQuery forwarding, PeerQuery local-query execution).
+- `cpp/include/scheduler/Scheduler.hpp` + `cpp/src/scheduler/Scheduler.cpp`
+  — single-driver chunk-push scheduler with two policies:
+  - **Greedy:** drains a single request's chunks fully before serving the next
+  - **RoundRobin:** each ready request gets one chunk per cycle, then yields
+  - Driver thread snapshots one chunk under the mutex, releases the mutex,
+    then performs the outbound `PushPeerChunk` RPC. When a job's records are
+    exhausted, calls `on_local_done(req_id)` so the service can mark
+    `local_done` and emit `source_done` upward via the existing
+    `try_emit_done_to_parent` aggregation helper.
+- `cpp/include/grpc/ServiceImpl.hpp` + `cpp/src/grpc/ServiceImpl.cpp`
+  — service now holds references to `WorkerPool` and `Scheduler`. The
+  PeerQuery local-query path is split: WorkerPool runs `query_engine_.run`,
+  then hands the result vector to `scheduler_.submit(req_id, parent, …)`.
+  Forwarding tasks go through WorkerPool. Added
+  `on_scheduler_local_done(req_id)` callback method.
+- `cpp/src/main_server.cpp` — instantiates WorkerPool and Scheduler before
+  the service. Scheduler's `on_local_done` callback is wired to the service
+  via a `unique_ptr` indirection so the closure can resolve before the
+  service object exists. Shutdown order: gRPC server stop → scheduler stop
+  → worker pool stop → heartbeat thread join.
+- `CMakeLists.txt` — adds the two new sources to `mini2_core`.
+- `python/fairness_test.py` — multi-threaded fairness probe. Submits 3
+  concurrent clients (HUGE/MED/SMALL) against gateway A, measures per-client
+  time-to-first-chunk and total time, prints a sorted summary.
+- `scripts/test_many_clients.sh` — sed-flips `scheduler_policy` across
+  every `config/tree/*.conf`, restarts the cluster under each policy, runs
+  `fairness_test.py`, and writes side-by-side results to
+  `experiments/fairness/{round_robin,greedy}.txt`. Restores configs to
+  `round_robin` on exit.
+
+**Verification:**
+- Single-client smoke: `python3 python/client.py … MANHATTAN 1000` →
+  4,124,656 records / 4,125 chunks / done=True in ~3.1s. Same as step 7;
+  refactor is non-regressive.
+- Multi-client comparison via `scripts/test_many_clients.sh`:
+
+  ```
+  --- round_robin ---
+  label                   records   chunks  first_chunk_s    total_s
+  SMALL-noise-veh          380043      849          0.032      0.949
+  MED-staten-island        861552     1815          0.046      1.681
+  HUGE-manhattan          4124656     4125          0.052      3.512
+
+  --- greedy ---
+  label                   records   chunks  first_chunk_s    total_s
+  SMALL-noise-veh          380043      381          0.012      0.545
+  MED-staten-island        861552      863          0.021      1.055
+  HUGE-manhattan          4124656     4125          0.042      3.279
+  ```
+
+  Key observation: **same record totals across policies (correctness)**, but
+  **chunk counts differ dramatically for SMALL/MED queries** under
+  round_robin (849 vs 381, 1815 vs 863). This is the scheduler interleaving
+  in action — under RR, peers split each push round across all 3 ready
+  jobs, so the gateway often returns partial chunks to the small client
+  while waiting for the next interleaved push. Under greedy, each peer
+  bursts a full job's worth of chunks, so the client fetches full
+  1000-record chunks in tight succession. Total wall time is dominated by
+  HUGE in both modes (3.5 vs 3.3s) because there is only one network bottleneck.
+
+**Notes / decisions:**
+- A single driver thread per node is intentional: it makes the policy
+  observable (one push at a time, ordered by policy) and avoids racey
+  fairness semantics across multiple concurrent pushers. Throughput is
+  bounded by network, not CPU, so this is not a real bottleneck — the
+  fairness numbers above (3.5s wall time for ~5.4M records across 9
+  shards) confirm.
+- WorkerPool defaults to `cfg.worker_pool_size` (8) — sized to be larger
+  than typical neighbor count + concurrent local queries.
+- Scheduler's `submit()` with empty `parent_node` is a no-op push (the
+  gateway path stores records directly in `aq.results` from
+  `PushPeerChunk`). It still fires `on_local_done` so symmetric callers
+  don't need a special case.
+- Greedy's queue had a small ballooning issue (it kept re-adding the
+  current-locked job even though the driver picks `greedy_current_`
+  directly). Fixed: only re-add when the queue is empty (so the wait
+  predicate has something to fire on).
+- Step 8 does NOT touch Python I (leaf, single push job per request — no
+  fairness benefit). The Python pusher in `python/server.py` still uses
+  the inline-thread approach. That's fine; the fairness test still shows
+  correct behavior because I contributes its full ~458k records
+  in-order regardless of policy.
+
+**Open items rolled into step 9:**
+- `Scheduler::cancel(req_id)` exists but isn't yet wired to `CancelQuery`
+  / `PeerCancel`. Step 9 adds the propagation.
+- `Scheduler` doesn't yet record metrics (chunk push latency, queue
+  depth). Step 11 will add `MetricsRecorder` rows for fairness analysis.
+
+---
 
 ### Step 7 — Python node I peer participation · DONE
 

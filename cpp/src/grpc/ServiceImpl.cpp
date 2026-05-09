@@ -126,7 +126,7 @@ grpc::Status Mini2ServiceImpl::SubmitQuery(grpc::ServerContext* /*context*/,
 
   // Forward PeerQuery asynchronously to every neighbor.
   for (const auto& neighbor : cfg_.neighbors) {
-    std::thread([this, neighbor, req_id, filter]() {
+    worker_pool_.submit([this, neighbor, req_id, filter]() {
       auto stub = client_pool_.get_stub(neighbor.id);
       if (!stub) {
         mark_child_completed(req_id, neighbor.id);
@@ -157,7 +157,7 @@ grpc::Status Mini2ServiceImpl::SubmitQuery(grpc::ServerContext* /*context*/,
         mark_child_completed(req_id, neighbor.id);
         try_emit_done_to_parent(req_id);
       }
-    }).detach();
+    });
   }
 
   reply->set_request_id(req_id);
@@ -307,10 +307,10 @@ grpc::Status Mini2ServiceImpl::PeerQuery(grpc::ServerContext* /*context*/,
 
   reply->set_accepted(true);
 
-  // Forward PeerQuery to each unvisited neighbor (async).
+  // Forward PeerQuery to each unvisited neighbor (worker pool).
   for (const auto& neighbor_id : expected) {
-    std::thread([this, neighbor_id, req_id, origin_node, filter, ttl_ms,
-                 chunk_records_req, max_chunk_bytes_req, next_visited]() {
+    worker_pool_.submit([this, neighbor_id, req_id, origin_node, filter, ttl_ms,
+                         chunk_records_req, max_chunk_bytes_req, next_visited]() {
       auto stub = client_pool_.get_stub(neighbor_id);
       if (!stub) {
         mark_child_completed(req_id, neighbor_id);
@@ -337,52 +337,30 @@ grpc::Status Mini2ServiceImpl::PeerQuery(grpc::ServerContext* /*context*/,
         mark_child_completed(req_id, neighbor_id);
         try_emit_done_to_parent(req_id);
       }
-    }).detach();
+    });
   }
 
-  // Run local query and push records to parent (async).
+  // Run local query (worker pool); on completion, hand the result set to the
+  // scheduler which pushes chunks to the parent under the configured policy.
   int chunk_records = chunk_records_req > 0 ? chunk_records_req : cfg_.default_chunk_records;
-  std::thread([this, req_id, filter, parent_node, chunk_records]() {
+  worker_pool_.submit([this, req_id, filter, parent_node, chunk_records]() {
     std::vector<ServiceRecord> results = query_engine_.run(filter);
-
-    auto stub = client_pool_.get_stub(parent_node);
-    if (stub) {
-      size_t pushed = 0;
-      int chunk_id = 0;
-      while (pushed < results.size()) {
-        PeerChunk chunk;
-        chunk.set_request_id(req_id);
-        chunk.set_source_node(cfg_.node_id);
-        chunk.set_destination_node(parent_node);
-        chunk.set_chunk_id(chunk_id++);
-
-        size_t to_push = std::min(static_cast<size_t>(chunk_records),
-                                  results.size() - pushed);
-        for (size_t i = 0; i < to_push; ++i) {
-          *chunk.add_records() = results[pushed + i].to_proto();
-        }
-        pushed += to_push;
-        chunk.set_source_done(false);
-
-        PeerChunkAck ack;
-        grpc::ClientContext ctx;
-        ctx.set_deadline(std::chrono::system_clock::now() +
-                         std::chrono::milliseconds(cfg_.peer_timeout_ms));
-        stub->PushPeerChunk(&ctx, chunk, &ack);
-      }
-    }
-
-    {
-      std::lock_guard<std::mutex> lock(mutex_);
-      auto it = active_queries_.find(req_id);
-      if (it != active_queries_.end()) {
-        it->second.local_done = true;
-      }
-    }
-    try_emit_done_to_parent(req_id);
-  }).detach();
+    scheduler_.submit(req_id, parent_node, std::move(results),
+                      static_cast<std::size_t>(chunk_records));
+  });
 
   return grpc::Status::OK;
+}
+
+void Mini2ServiceImpl::on_scheduler_local_done(const std::string& req_id) {
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = active_queries_.find(req_id);
+    if (it != active_queries_.end()) {
+      it->second.local_done = true;
+    }
+  }
+  try_emit_done_to_parent(req_id);
 }
 
 grpc::Status Mini2ServiceImpl::PushPeerChunk(grpc::ServerContext* /*context*/,

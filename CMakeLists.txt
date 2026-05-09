@@ -60,6 +60,8 @@ add_library(mini2_core STATIC
   cpp/src/query/DataStore.cpp
   cpp/src/query/IndexSet.cpp
   cpp/src/query/LocalQueryEngine.cpp
+  cpp/src/scheduler/WorkerPool.cpp
+  cpp/src/scheduler/Scheduler.cpp
 )
 target_include_directories(mini2_core PUBLIC cpp/include)
 target_link_libraries(mini2_core PUBLIC mini2_proto)

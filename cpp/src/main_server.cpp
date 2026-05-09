@@ -12,6 +12,8 @@
 #include "query/DataStore.hpp"
 #include "query/IndexSet.hpp"
 #include "query/LocalQueryEngine.hpp"
+#include "scheduler/WorkerPool.hpp"
+#include "scheduler/Scheduler.hpp"
 #include "mini2.grpc.pb.h"
 
 // ─── Global shutdown flag ───────────────────────────────────────────────────
@@ -109,11 +111,31 @@ int main(int argc, char** argv) {
     // Create client pool for outbound RPCs
     mini2::GrpcClientPool client_pool(cfg);
 
-    // Create service implementation
-    mini2::Mini2ServiceImpl service(cfg, query_engine, client_pool);
+    // Worker pool for one-shot async tasks (PeerQuery forwarding, local
+    // query execution). Scheduler drives chunk-push fairness.
+    mini2::WorkerPool worker_pool(cfg.worker_pool_size > 0
+                                      ? cfg.worker_pool_size : 8);
+
+    auto policy = mini2::Scheduler::policy_from_string(cfg.scheduler_policy);
+    std::cout << "[scheduler] policy=" << cfg.scheduler_policy
+              << " worker_pool=" << (cfg.worker_pool_size > 0
+                                          ? cfg.worker_pool_size : 8) << "\n";
+
+    // Forward declare service so the scheduler callback can reach it.
+    std::unique_ptr<mini2::Mini2ServiceImpl> service_ptr;
+    mini2::Scheduler scheduler(
+        cfg, client_pool, policy,
+        [&service_ptr](const std::string& req_id) {
+          if (service_ptr) service_ptr->on_scheduler_local_done(req_id);
+        });
+
+    service_ptr = std::make_unique<mini2::Mini2ServiceImpl>(
+        cfg, query_engine, client_pool, worker_pool, scheduler);
+
+    scheduler.start();
 
     // Create and start gRPC server
-    mini2::GrpcServer server(cfg, service);
+    mini2::GrpcServer server(cfg, *service_ptr);
     server.start();
 
     // Start heartbeat thread
@@ -130,8 +152,11 @@ int main(int argc, char** argv) {
 
     std::cout << "[mini2_server] " << cfg.node_id << " shutting down...\n";
 
-    // Clean up
+    // Clean up — order matters: stop accepting RPCs, then drain scheduler
+    // and worker pool, then join helpers.
     server.shutdown();
+    scheduler.stop();
+    worker_pool.stop();
     if (hb_thread.joinable()) {
       hb_thread.join();
     }
