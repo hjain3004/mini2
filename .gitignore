@@ -8,6 +8,7 @@ python/generated/
 
 # Generated data
 data/partitions/*.csv
+!data/partitions-small/
 dataset/
 experiments/metrics_output/*.csv
 experiments/logs/
