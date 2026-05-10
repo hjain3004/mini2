@@ -47,9 +47,11 @@ We have a **distributed query engine** that processes NYC 311 Service Request da
 
 **Node assignment for 2-machine demo:**
 
-| Machine 1 (m1) | Machine 2 (m2) |
+| Machine 1 — m1 (your MacBook) | Machine 2 — m2 (teammate's MacBook) |
 |---|---|
 | A (gateway), B, C, D | E, F, G, H, I (Python) |
+
+**Networking:** Both MacBooks connect to the **same WiFi router**. No ethernet needed.
 
 ---
 
@@ -57,25 +59,33 @@ We have a **distributed query engine** that processes NYC 311 Service Request da
 
 ### 2.1 Software Requirements
 
-Both machines need:
+Run these on **both MacBooks**:
 
 ```bash
-# macOS (Homebrew)
+# Install C++ toolchain + gRPC
 brew install grpc protobuf cmake python3
 
 # Python dependencies
-pip3 install grpcio grpcio-tools protobuf matplotlib
+pip3 install --break-system-packages grpcio grpcio-tools protobuf matplotlib
 ```
+
+> [!TIP]
+> Your teammate can also run `bash scripts/check_deps.sh` to auto-check and install everything.
 
 ### 2.2 Verify gRPC is installed
 
+Run on **both MacBooks**:
+
 ```bash
-# Should print version, e.g., "libprotoc 27.x"
+# Should print version, e.g., "libprotoc 34.x"
 protoc --version
 
-# Should find grpc
-pkg-config --modversion grpc++
+# Verify gRPC C++ plugin exists:
+ls /opt/homebrew/bin/grpc_cpp_plugin && echo "gRPC OK"
 ```
+
+> [!NOTE]
+> `pkg-config` is **not** installed by default on macOS and is not needed. If `protoc --version` works and `grpc_cpp_plugin` exists, you're good.
 
 > [!WARNING]
 > If `protoc --version` fails, gRPC is not installed. You MUST install it before proceeding. See Troubleshooting §6.1.
@@ -95,6 +105,8 @@ This reads `dataset/311_2020.csv` (12.7 GB) and produces 9 shard files in `data/
 > Each shard is ~1.4 GB. You need ~15 GB free disk space for all partitions.
 
 ### 2.4 Build the C++ binary
+
+Run on **both MacBooks**:
 
 ```bash
 # From the mini2 root directory:
@@ -215,18 +227,21 @@ Continue to [§5 — Demo Scenarios](#5-demo-scenarios--what-to-show).
 
 ### 4.1 Identify Machine IPs
 
-On each machine, find the local IP:
+Both MacBooks must be on the **same WiFi network** (connected to the same router).
 
+On **each MacBook**, open a terminal:
 ```bash
-# macOS:
 ipconfig getifaddr en0
-# or for WiFi:
+```
+
+If that returns nothing (some Macs use a different interface for WiFi):
+```bash
 ipconfig getifaddr en1
 ```
 
 **Example:**
-- Machine 1 (m1): `192.168.1.100`
-- Machine 2 (m2): `192.168.1.101`
+- Machine 1 — m1 (your MacBook): `192.168.1.100`
+- Machine 2 — m2 (teammate's MacBook): `192.168.1.101`
 
 Write these down — you'll use them to create config files.
 
@@ -288,50 +303,63 @@ neighbors=B:192.168.1.100:50052,H:192.168.1.101:50058,G:192.168.1.101:50057,I:19
 > [!IMPORTANT]
 > The `host=0.0.0.0` means "listen on all interfaces" — this is required so machines can reach each other over the LAN. The `neighbors` lines use actual IPs.
 
-### 4.3 Copy the project to both machines
+### 4.3 Set up the teammate's MacBook (m2)
 
-Both machines need the **entire `mini2/` directory** including:
-- The built binary (`build/mini2_server`)
-- Python files (`python/`)
-- Config files (`config/tree-lan/`)
-- Data partitions (`data/partitions/`)
+**Option A: Clone + build independently (recommended)**
 
+On the teammate's MacBook:
 ```bash
-# From m1, copy to m2 (adjust path as needed):
+# Clone the repo
+git clone <your-repo-url> ~/mini2
+cd ~/mini2
+
+# Check & install all dependencies
+bash scripts/check_deps.sh
+
+# Build C++ binary
+bash scripts/build.sh
+
+# Generate Python stubs
+bash scripts/gen_python_stubs.sh
+
+# Partition dataset (needs dataset/311_2020.csv)
+python3 scripts/partition_data.py
+```
+
+> [!IMPORTANT]
+> The dataset file `dataset/311_2020.csv` (12.7 GB) must be on the teammate's MacBook too. Transfer it via USB drive or AirDrop — WiFi transfer of 12 GB will be slow.
+
+**Option B: Copy everything from your MacBook**
+```bash
+# From your MacBook (m1) — copy entire project:
 rsync -avz --progress /path/to/mini2/ user@M2_IP:/path/to/mini2/
 ```
 
 > [!WARNING]
-> The `data/partitions/` folder is ~13 GB total. This copy will take a while over WiFi. Use ethernet if possible.
+> The `data/partitions/` folder is ~13 GB. Use a USB drive if WiFi is too slow.
 
-**Alternative:** Build and partition on each machine independently:
-```bash
-# On m2:
-bash scripts/build.sh
-python3 scripts/partition_data.py
-bash scripts/gen_python_stubs.sh
-```
+### 4.4 Disable Firewalls
 
-### 4.4 Open the macOS Firewall
-
-macOS may block incoming gRPC connections. On **both machines**:
+macOS may block incoming gRPC connections. On **both MacBooks**:
 
 ```bash
 # Option 1: Temporarily disable firewall (easiest for demo)
 sudo /usr/libexec/ApplicationFirewall/socketfilterfw --setglobalstate off
 
-# Option 2: Allow the specific binary
+# Option 2: Allow the specific binaries
 sudo /usr/libexec/ApplicationFirewall/socketfilterfw --add $(pwd)/build/mini2_server
 sudo /usr/libexec/ApplicationFirewall/socketfilterfw --add $(which python3)
 ```
 
 > [!CAUTION]
-> Remember to re-enable the firewall after the demo:
-> `sudo /usr/libexec/ApplicationFirewall/socketfilterfw --setglobalstate on`
+> Re-enable the firewall on both machines after the demo:
+> ```bash
+> sudo /usr/libexec/ApplicationFirewall/socketfilterfw --setglobalstate on
+> ```
 
-### 4.5 Launch on Machine 1 (m1)
+### 4.5 Launch on Machine 1 — MacBook (m1)
 
-Open a terminal on Machine 1:
+Open a terminal on your MacBook:
 
 ```bash
 cd /path/to/mini2
@@ -350,9 +378,9 @@ for node in A B C D; do
 done
 ```
 
-### 4.6 Launch on Machine 2 (m2)
+### 4.6 Launch on Machine 2 — teammate's MacBook (m2)
 
-Open a terminal on Machine 2:
+Open a terminal on the teammate's MacBook:
 
 ```bash
 cd /path/to/mini2
@@ -381,16 +409,23 @@ echo "Started I (Python)"
 Wait **30 seconds** for dataset loading, then verify on each machine:
 
 ```bash
-# On m1: should show 4 processes
+# On your MacBook (m1): should show 4 processes
 ps aux | grep mini2_server | grep -v grep | wc -l
 
-# On m2: should show 4 C++ + 1 Python = 5 processes
+# On teammate's MacBook (m2): should show 4 C++ + 1 Python = 5 processes
 ps aux | grep -E "mini2_server|python.*server" | grep -v grep | wc -l
 ```
 
+**Quick connectivity test from your MacBook:**
+```bash
+# Can you reach a port on the teammate's MacBook?
+nc -zv <M2_IP> 50055
+```
+If this fails, check that the firewall is disabled on m2 (§4.4).
+
 Check heartbeats cross the LAN:
 ```bash
-# On m1:
+# On MacBook:
 grep "heartbeat.*OK" experiments/logs/A.log | tail -5
 ```
 
@@ -405,7 +440,7 @@ The client **always connects to A (the gateway)**. From either machine:
 python3 python/client.py 127.0.0.1:50051 borough eq MANHATTAN 1000
 
 # If running from m2 (A is on m1):
-python3 python/client.py 192.168.1.100:50051 borough eq MANHATTAN 1000
+python3 python/client.py <M1_IP>:50051 borough eq MANHATTAN 1000
 ```
 
 ---
@@ -662,16 +697,14 @@ tail -20 experiments/logs/A.log
 cat experiments/logs/<NODE>.log | head -20
 ```
 
-**Problem (LAN):** Firewall blocking, wrong IP, or network issue.
+**Problem (LAN):** Firewall blocking or wrong IP.
 
 **Solution:**
 ```bash
-# Test basic connectivity:
-nc -zv <OTHER_MACHINE_IP> <PORT>
-# Example:
-nc -zv 192.168.1.101 50055
+# Test basic connectivity from your MacBook:
+nc -zv <M2_IP> 50055
 
-# If blocked, disable firewall:
+# If blocked, disable macOS firewall on BOTH machines:
 sudo /usr/libexec/ApplicationFirewall/socketfilterfw --setglobalstate off
 ```
 
