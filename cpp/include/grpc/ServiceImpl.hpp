@@ -31,6 +31,7 @@ struct ActiveQuery {
   bool cancelled = false;
   uint32_t next_chunk_id = 0;
   time_t last_activity = 0;
+  time_t created_at = 0;
 
   // Peer forwarding state
   std::string parent_node;
@@ -57,6 +58,10 @@ public:
   // Called by Scheduler when a request's local result push is exhausted.
   // Marks local_done and tries to emit source_done upward.
   void on_scheduler_local_done(const std::string& req_id);
+
+  // Step 9: TTL janitor — runs periodically from main_server. Caller
+  // provides the global shutdown flag so the loop can exit.
+  void run_janitor(const std::atomic<bool>& shutdown);
 
   // ─── Health check ─────────────────────────────────────────────────────────
 
@@ -109,6 +114,10 @@ private:
   bool mark_child_completed(const std::string& req_id,
                             const std::string& child_id);
   void try_emit_done_to_parent(const std::string& req_id);
+
+  // Step 9: Cancellation propagation — sends PeerCancel to every expected
+  // child that hasn't completed yet. Must be called WITHOUT mutex_ held.
+  void propagate_cancel_to_children(const std::string& req_id);
 };
 
 }  // namespace mini2

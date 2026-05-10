@@ -1,8 +1,8 @@
 [fairness] launching 3 concurrent clients against 127.0.0.1:50051 (chunk_records=1000)
 
-[fairness] all clients done in 3.281s
+[fairness] all clients done in 3.558s
 label                   records   chunks  first_chunk_s    total_s
 ------------------------------------------------------------------
-SMALL-noise-veh          380043      381          0.012      0.545
-MED-staten-island        861552      863          0.021      1.055
-HUGE-manhattan          4124656     4125          0.042      3.279
+MED-staten-island        765958      864          0.079      1.224
+SMALL-noise-veh          337663     1250          0.078      1.293
+HUGE-manhattan          3666627     5428          0.080      3.555

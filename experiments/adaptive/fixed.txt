@@ -1,0 +1,8 @@
+label=fixed
+records=3666627
+chunks=4311
+first_chunk_s=0.1186521053314209
+total_s=3.424484968185425
+avg_chunk=2641.662103746398
+min_chunk=241
+max_chunk=5000

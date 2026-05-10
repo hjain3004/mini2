@@ -24,10 +24,10 @@ on top of "Recent activity"; checklist below.
   reaches it through A.
 - [x] **8. Scheduler + WorkerPool** — round-robin policy;
   `test_many_clients.sh` shows fairness vs greedy.
-- [ ] **9. Cancellation + TTL janitor** — `PeerCancel` propagation;
+- [x] **9. Cancellation + TTL janitor** — `PeerCancel` propagation;
   abandoned-fetch cleanup.
-- [ ] **10. Adaptive chunking** — flag-gated; tune via experiments.
-- [ ] **11. Metrics + experiments** — run §20.{1,2,4,5} (chunk size,
+- [x] **10. Adaptive chunking** — flag-gated; tune via experiments.
+- [x] **11. Metrics + experiments** — run §20.{1,2,4,5} (chunk size,
   fairness, local-vs-distributed, linear-vs-indexed); plot.
 - [ ] **12. Two-machine demo** — finalize `tree-lan/` configs, run §22 demo.
 - [ ] **13. Report** — `report/mini2_report.md` per §24 structure.
@@ -35,6 +35,151 @@ on top of "Recent activity"; checklist below.
 ---
 
 ## Recent Activity
+
+### Step 11 — Metrics + Experiments · DONE
+
+**Date:** 2026-05-09
+
+**What landed:**
+- `proto/mini2.proto` — Added `force_linear_scan` to both `QueryRequest`
+  and `PeerQueryRequest` for the linear-vs-indexed experiment.
+- `cpp/src/grpc/ServiceImpl.cpp` — Wired `force_linear_scan` through
+  `SubmitQuery` and `PeerQuery` into `query_engine_.run(filter, force_linear)`.
+  The flag propagates through the full tree.
+- `python/experiment_runner.py` — [NEW] Parametric query runner that outputs
+  CSV rows (label, records, chunks, submit_ms, first_chunk_ms, total_ms,
+  chunk_records, force_linear).
+- `scripts/run_experiments.sh` — [NEW] Orchestrates all 4 experiments:
+  1. Chunk size sweep (100/500/1000/2000/5000, 3 runs each)
+  2. Fairness (round_robin vs greedy, 3 concurrent clients)
+  3. Local vs distributed (A-only vs 9-node cluster)
+  4. Linear vs indexed scan (force_linear_scan flag)
+- `python/plot_experiments.py` — [NEW] Generates 4 matplotlib figures:
+  - `report/figures/chunk_size.png`
+  - `report/figures/fairness.png`
+  - `report/figures/local_vs_distributed.png`
+  - `report/figures/linear_vs_indexed.png`
+
+**Key results:**
+
+| Experiment | Finding |
+|---|---|
+| §20.1 Chunk Size | 100→5000: 7.4s→3.4s (2.2× faster). Diminishing returns above 1000. |
+| §20.2 Fairness | RR gives small queries faster completion (891ms vs 1293ms for SMALL); greedy penalizes small queries. |
+| §20.4 Local vs Dist | Local: 262ms / 458k records. Distributed: 2.7s / 3.7M records (8× more data). |
+| §20.5 Linear vs Indexed | Index: 249ms. Linear: 279ms. 1.1× speedup — modest because borough is a coarse partition. |
+
+---
+
+
+
+**Date:** 2026-05-09
+
+**What landed:**
+- `cpp/include/scheduler/Scheduler.hpp` — Added `last_push_latency_ms`
+  to `Job` struct for push-feedback tracking.
+- `cpp/src/scheduler/Scheduler.cpp` — `driver_loop()` now measures the
+  wall-clock latency of each `PushPeerChunk` RPC. When
+  `cfg_.adaptive_chunking` is true and the job is not yet done, the
+  adaptive formula adjusts `chunk_records`:
+  - `latency < 20ms && remaining > 5000`: double, capped at 5,000
+  - `latency > 200ms`: halve, floored at 100
+  - Otherwise: unchanged
+  Flag-gated by `adaptive_chunking=true` in config (default: false).
+- `python/adaptive_test.py` — [NEW] Test client that submits a large
+  MANHATTAN query and reports chunk count, avg/min/max chunk size, first
+  chunk time, and total time.
+- `scripts/test_adaptive_chunking.sh` — [NEW] Automation: flips all
+  `config/tree/*.conf` between `adaptive_chunking=false/true`, restarts
+  cluster under each mode, runs `adaptive_test.py`, and prints a
+  side-by-side summary.
+
+**Verification:**
+- Ran `scripts/test_adaptive_chunking.sh` — both modes produce the **same
+  3,666,627 records** (correctness preserved).
+- Key metrics comparison:
+
+  ```
+  Metric           Fixed       Adaptive
+  ─────────────    ─────       ────────
+  Total chunks     4,311        734       (6× fewer)
+  Avg chunk size   2,642       4,995
+  Min chunk size     241       1,627
+  Max chunk size   5,000       5,000
+  First chunk      0.119s      0.098s
+  Total time       3.42s       2.96s     (13% faster)
+  ```
+
+- The adaptive mode rapidly doubles chunk sizes (push latencies on
+  localhost are well under 20ms with >5000 records remaining), converging
+  to the 5,000-record cap within the first few pushes per peer.
+
+**Notes / decisions:**
+- Python node I (leaf) does not implement adaptive chunking — its inline
+  push loop uses fixed chunk sizes from the PeerQuery request. Acceptable
+  because I's contribution is small (~458k records) and it pushes directly
+  to A with no intermediate hops.
+- The `max_chunk_records` cap (5,000) prevents runaway chunk sizes that
+  would exceed gRPC message limits or cause memory spikes.
+- The config default remains `adaptive_chunking=false` so existing
+  experiments (Step 8 fairness, Step 9 cancellation) are unaffected.
+
+---
+
+
+
+**Date:** 2026-05-09
+
+**What landed:**
+- `cpp/include/grpc/ServiceImpl.hpp` — Added `created_at` to `ActiveQuery`
+  for TTL tracking. Added public `run_janitor()` and private
+  `propagate_cancel_to_children()` declarations.
+- `cpp/src/grpc/ServiceImpl.cpp`:
+  - **`CancelQuery`**: Now cancels the scheduler job and propagates
+    `PeerCancel` to all incomplete children via `propagate_cancel_to_children()`.
+  - **`PeerCancel`**: Full implementation — marks query cancelled, cancels
+    scheduler job, then recursively propagates `PeerCancel` downstream
+    to its own expected children (tree-wide propagation).
+  - **`propagate_cancel_to_children()`**: Snapshots incomplete children under
+    mutex, then sends `PeerCancel` to each via the worker pool (without
+    holding the mutex).
+  - **`run_janitor()`**: Runs every 500ms, implements three janitor behaviors:
+    1. **TTL expiry** — cancels requests older than `request_ttl_ms`.
+    2. **Abandon timeout** — gateway-only: cancels requests whose
+       `last_activity` (from FetchChunk) exceeds `abandon_timeout_ms`.
+    3. **GC reaping** — garbage-collects fully-done/cancelled requests
+       older than 2× TTL.
+  - Both `SubmitQuery` and `PeerQuery` now set `created_at` on the
+    `ActiveQuery` for proper TTL computation.
+- `cpp/src/main_server.cpp` — Launches janitor thread after heartbeat
+  thread; joins it on shutdown.
+- `python/server.py` — `PeerCancel` already implemented in Step 7 (leaf
+  node marks cancelled + halts chunk pusher). No changes needed.
+- `python/cancel_test.py` — [NEW] Test client that submits a large query,
+  fetches N chunks, sends `CancelQuery`, then verifies the post-cancel
+  FetchChunk returns `done=True, cancelled=True`.
+
+**Verification:**
+- **Non-regression**: `python3 client.py … MANHATTAN 1000` → 4,124,656
+  records / 4,125 chunks / done=True. Same as Step 8.
+- **Cancellation flow**: `python3 cancel_test.py 127.0.0.1:50051 3`
+  - Fetched 3 chunks (3,000 records), sent `CancelQuery`.
+  - Server returned `CancelAck: cancelled=True`.
+  - Post-cancel FetchChunk: 0 records, `done=True, cancelled=True`.
+- **Tree-wide propagation verified via logs:**
+  ```
+  A -> B, G, H, I  (A's children)
+  B -> C, D, E     (B's children)
+  E -> F           (E's child)
+  I: peer-cancelled (Python)
+  ```
+- **TTL expiry**: After 10s, janitor on each node logged
+  `[janitor] X TTL expired A-1 (age=11000ms)`.
+- **GC reaping**: After 2× TTL (~20s), janitor logged
+  `[janitor] X reaped A-1` and `[janitor] X reaped A-2` on all nodes,
+  confirming completed+cancelled queries were garbage-collected.
+
+---
 
 ### Step 8 — Scheduler + WorkerPool · DONE
 

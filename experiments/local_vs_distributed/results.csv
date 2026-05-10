@@ -1,0 +1,7 @@
+label,records,chunks,submit_ms,first_chunk_ms,total_ms,chunk_records,force_linear
+distributed_r1,3666627,3881,36.0,39.5,2685.5,1000,0
+distributed_r2,3666627,3701,60.2,64.4,2746.1,1000,0
+distributed_r3,3666627,3611,36.9,42.1,2777.4,1000,0
+local_r1,457601,92,29.6,34.2,267.9,1000,0
+local_r2,457601,92,29.5,34.0,266.4,1000,0
+local_r3,457601,92,29.4,33.4,251.4,1000,0

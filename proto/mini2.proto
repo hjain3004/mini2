@@ -67,6 +67,7 @@ message QueryRequest {
   QueryFilter filter = 3;
   int32  requested_chunk_records = 4;
   int64  max_chunk_bytes = 5;
+  bool   force_linear_scan = 6;        // Step 11: bypass indexes for experiment
 }
 
 message QueryAccepted {
@@ -113,6 +114,7 @@ message PeerQueryRequest {
   repeated string visited_nodes = 7;
   int32  chunk_records = 8;
   int64  max_chunk_bytes = 9;
+  bool   force_linear_scan = 10;       // Step 11: propagate linear-scan flag
 }
 
 message PeerQueryAck {

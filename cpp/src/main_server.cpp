@@ -142,6 +142,11 @@ int main(int argc, char** argv) {
     std::thread hb_thread(heartbeat_loop, std::cref(cfg),
                           std::ref(client_pool));
 
+    // Step 9: Start TTL janitor thread (reaps expired/abandoned queries).
+    std::thread janitor_thread([&service_ptr]() {
+      if (service_ptr) service_ptr->run_janitor(g_shutdown);
+    });
+
     std::cout << "[mini2_server] " << cfg.node_id
               << " running. Press Ctrl+C to stop.\n";
 
@@ -159,6 +164,9 @@ int main(int argc, char** argv) {
     worker_pool.stop();
     if (hb_thread.joinable()) {
       hb_thread.join();
+    }
+    if (janitor_thread.joinable()) {
+      janitor_thread.join();
     }
 
     std::cout << "[mini2_server] " << cfg.node_id << " stopped.\n";

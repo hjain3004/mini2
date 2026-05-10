@@ -158,7 +158,8 @@ void Scheduler::driver_loop() {
       }
     }
 
-    // Outside the mutex: do the actual gRPC push.
+    // Outside the mutex: do the actual gRPC push, measuring latency.
+    double push_latency_ms = 0.0;
     auto stub = pool_.get_stub(snapshot.parent_node);
     if (stub) {
       PeerChunk chunk;
@@ -175,7 +176,28 @@ void Scheduler::driver_loop() {
       grpc::ClientContext ctx;
       ctx.set_deadline(std::chrono::system_clock::now() +
                        std::chrono::milliseconds(cfg_.peer_timeout_ms));
+
+      auto t0 = std::chrono::steady_clock::now();
       stub->PushPeerChunk(&ctx, chunk, &ack);
+      auto t1 = std::chrono::steady_clock::now();
+      push_latency_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    }
+
+    // Step 10: Adaptive chunking — adjust chunk_records based on push latency.
+    if (cfg_.adaptive_chunking && !job_done) {
+      std::lock_guard<std::mutex> lock(mutex_);
+      auto it = jobs_.find(snapshot.req_id);
+      if (it != jobs_.end()) {
+        Job& job = it->second;
+        job.last_push_latency_ms = push_latency_ms;
+        std::size_t remaining = job.results.size() - job.cursor;
+
+        if (push_latency_ms < 20.0 && remaining > 5000) {
+          job.chunk_records = std::min(job.chunk_records * 2, std::size_t{5000});
+        } else if (push_latency_ms > 200.0) {
+          job.chunk_records = std::max(job.chunk_records / 2, std::size_t{100});
+        }
+      }
     }
 
     if (job_done && on_local_done_) {

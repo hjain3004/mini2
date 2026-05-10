@@ -70,6 +70,7 @@ private:
     std::size_t cursor = 0;
     std::size_t chunk_records = 500;
     int chunk_id = 0;
+    double last_push_latency_ms = 0.0;  // Step 10: adaptive chunking feedback
   };
 
   const Config& cfg_;

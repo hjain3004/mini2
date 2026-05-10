@@ -102,7 +102,8 @@ grpc::Status Mini2ServiceImpl::SubmitQuery(grpc::ServerContext* /*context*/,
             << " from " << request->client_id() << "\n";
 
   // Run the local query synchronously (gateway only — workers do this in PeerQuery thread).
-  std::vector<ServiceRecord> results = query_engine_.run(request->filter());
+  bool force_linear = request->force_linear_scan();
+  std::vector<ServiceRecord> results = query_engine_.run(request->filter(), force_linear);
 
   time_t now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
 
@@ -111,6 +112,7 @@ grpc::Status Mini2ServiceImpl::SubmitQuery(grpc::ServerContext* /*context*/,
   aq.client_id = request->client_id();
   aq.results = std::move(results);
   aq.last_activity = now;
+  aq.created_at = now;
   aq.local_done = true;
   aq.parent_node = "";  // gateway has no parent
   for (const auto& neighbor : cfg_.neighbors) {
@@ -126,7 +128,7 @@ grpc::Status Mini2ServiceImpl::SubmitQuery(grpc::ServerContext* /*context*/,
 
   // Forward PeerQuery asynchronously to every neighbor.
   for (const auto& neighbor : cfg_.neighbors) {
-    worker_pool_.submit([this, neighbor, req_id, filter]() {
+    worker_pool_.submit([this, neighbor, req_id, filter, force_linear]() {
       auto stub = client_pool_.get_stub(neighbor.id);
       if (!stub) {
         mark_child_completed(req_id, neighbor.id);
@@ -144,6 +146,7 @@ grpc::Status Mini2ServiceImpl::SubmitQuery(grpc::ServerContext* /*context*/,
       pq_req.add_visited_nodes(cfg_.node_id);
       pq_req.set_chunk_records(500);
       pq_req.set_max_chunk_bytes(65536);
+      pq_req.set_force_linear_scan(force_linear);
 
       PeerQueryAck pq_reply;
       grpc::ClientContext context;
@@ -216,18 +219,27 @@ grpc::Status Mini2ServiceImpl::FetchChunk(grpc::ServerContext* /*context*/,
 grpc::Status Mini2ServiceImpl::CancelQuery(grpc::ServerContext* /*context*/,
                                            const CancelRequest* request,
                                            CancelAck* reply) {
-  std::lock_guard<std::mutex> lock(mutex_);
-
   reply->set_request_id(request->request_id());
 
-  auto it = active_queries_.find(request->request_id());
-  if (it != active_queries_.end()) {
-    it->second.cancelled = true;
-    reply->set_cancelled(true);
-    std::cout << "[query] " << cfg_.node_id << " cancelled query "
-              << request->request_id() << "\n";
-  } else {
-    reply->set_cancelled(false);
+  bool found = false;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = active_queries_.find(request->request_id());
+    if (it != active_queries_.end() && !it->second.cancelled) {
+      it->second.cancelled = true;
+      found = true;
+      std::cout << "[query] " << cfg_.node_id << " cancelled query "
+                << request->request_id() << "\n";
+    }
+  }
+
+  reply->set_cancelled(found);
+
+  if (found) {
+    // Cancel any pending scheduler job.
+    scheduler_.cancel(request->request_id());
+    // Propagate PeerCancel to children (without mutex).
+    propagate_cancel_to_children(request->request_id());
   }
 
   return grpc::Status::OK;
@@ -268,6 +280,7 @@ grpc::Status Mini2ServiceImpl::PeerQuery(grpc::ServerContext* /*context*/,
   int32_t ttl_ms = request->ttl_ms();
   int32_t chunk_records_req = request->chunk_records();
   int32_t max_chunk_bytes_req = request->max_chunk_bytes();
+  bool force_linear = request->force_linear_scan();
 
   std::vector<std::string> next_visited;
   for (const auto& vn : request->visited_nodes()) next_visited.push_back(vn);
@@ -302,6 +315,7 @@ grpc::Status Mini2ServiceImpl::PeerQuery(grpc::ServerContext* /*context*/,
     aq.parent_node = parent_node;
     aq.expected_children = expected;
     aq.last_activity = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+    aq.created_at = aq.last_activity;
     active_queries_[req_id] = std::move(aq);
   }
 
@@ -310,7 +324,7 @@ grpc::Status Mini2ServiceImpl::PeerQuery(grpc::ServerContext* /*context*/,
   // Forward PeerQuery to each unvisited neighbor (worker pool).
   for (const auto& neighbor_id : expected) {
     worker_pool_.submit([this, neighbor_id, req_id, origin_node, filter, ttl_ms,
-                         chunk_records_req, max_chunk_bytes_req, next_visited]() {
+                         chunk_records_req, max_chunk_bytes_req, next_visited, force_linear]() {
       auto stub = client_pool_.get_stub(neighbor_id);
       if (!stub) {
         mark_child_completed(req_id, neighbor_id);
@@ -327,6 +341,7 @@ grpc::Status Mini2ServiceImpl::PeerQuery(grpc::ServerContext* /*context*/,
       for (const auto& vn : next_visited) pq_req.add_visited_nodes(vn);
       pq_req.set_chunk_records(chunk_records_req);
       pq_req.set_max_chunk_bytes(max_chunk_bytes_req);
+      pq_req.set_force_linear_scan(force_linear);
 
       PeerQueryAck pq_reply;
       grpc::ClientContext ctx;
@@ -343,8 +358,8 @@ grpc::Status Mini2ServiceImpl::PeerQuery(grpc::ServerContext* /*context*/,
   // Run local query (worker pool); on completion, hand the result set to the
   // scheduler which pushes chunks to the parent under the configured policy.
   int chunk_records = chunk_records_req > 0 ? chunk_records_req : cfg_.default_chunk_records;
-  worker_pool_.submit([this, req_id, filter, parent_node, chunk_records]() {
-    std::vector<ServiceRecord> results = query_engine_.run(filter);
+  worker_pool_.submit([this, req_id, filter, parent_node, chunk_records, force_linear]() {
+    std::vector<ServiceRecord> results = query_engine_.run(filter, force_linear);
     scheduler_.submit(req_id, parent_node, std::move(results),
                       static_cast<std::size_t>(chunk_records));
   });
@@ -443,10 +458,145 @@ grpc::Status Mini2ServiceImpl::PushPeerChunk(grpc::ServerContext* /*context*/,
 }
 
 grpc::Status Mini2ServiceImpl::PeerCancel(grpc::ServerContext* /*context*/,
-                                          const PeerCancelRequest* /*request*/,
-                                          PeerCancelAck* /*reply*/) {
-  return grpc::Status(grpc::StatusCode::UNIMPLEMENTED,
-                      "PeerCancel not yet implemented");
+                                          const PeerCancelRequest* request,
+                                          PeerCancelAck* reply) {
+  reply->set_request_id(request->request_id());
+
+  bool found = false;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = active_queries_.find(request->request_id());
+    if (it != active_queries_.end() && !it->second.cancelled) {
+      it->second.cancelled = true;
+      found = true;
+      std::cout << "[cancel] " << cfg_.node_id << " peer-cancelled "
+                << request->request_id()
+                << " (from " << request->sender_node() << ")\n";
+    }
+  }
+
+  reply->set_cancelled(found);
+
+  if (found) {
+    scheduler_.cancel(request->request_id());
+    propagate_cancel_to_children(request->request_id());
+  }
+
+  return grpc::Status::OK;
+}
+
+// ─── Cancellation propagation ───────────────────────────────────────────────
+
+void Mini2ServiceImpl::propagate_cancel_to_children(const std::string& req_id) {
+  // Snapshot the children we need to cancel.
+  std::vector<std::string> children_to_cancel;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = active_queries_.find(req_id);
+    if (it == active_queries_.end()) return;
+    const ActiveQuery& aq = it->second;
+    for (const auto& child : aq.expected_children) {
+      // Only cancel children that haven't already completed.
+      bool completed = false;
+      for (const auto& c : aq.completed_children) {
+        if (c == child) { completed = true; break; }
+      }
+      if (!completed) children_to_cancel.push_back(child);
+    }
+  }
+
+  // Send PeerCancel to each (without the mutex).
+  for (const auto& child_id : children_to_cancel) {
+    worker_pool_.submit([this, req_id, child_id]() {
+      auto stub = client_pool_.get_stub(child_id);
+      if (!stub) return;
+      PeerCancelRequest cancel_req;
+      cancel_req.set_request_id(req_id);
+      cancel_req.set_sender_node(cfg_.node_id);
+      cancel_req.set_reason("cancelled");
+
+      PeerCancelAck cancel_ack;
+      grpc::ClientContext ctx;
+      ctx.set_deadline(std::chrono::system_clock::now() +
+                       std::chrono::milliseconds(cfg_.peer_timeout_ms));
+      auto status = stub->PeerCancel(&ctx, cancel_req, &cancel_ack);
+      if (status.ok()) {
+        std::cout << "[cancel] " << cfg_.node_id
+                  << " propagated PeerCancel -> " << child_id
+                  << " for " << req_id << "\n";
+      }
+    });
+  }
+}
+
+// ─── TTL Janitor ────────────────────────────────────────────────────────────
+
+void Mini2ServiceImpl::run_janitor(const std::atomic<bool>& shutdown) {
+  while (!shutdown.load()) {
+    // Sleep 500ms between sweeps (interruptible).
+    for (int i = 0; i < 5 && !shutdown.load(); ++i) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    if (shutdown.load()) return;
+
+    time_t now = std::chrono::system_clock::to_time_t(
+        std::chrono::system_clock::now());
+
+    // Collect request_ids that need reaping.
+    std::vector<std::string> to_cancel;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      for (auto& [req_id, aq] : active_queries_) {
+        if (aq.cancelled) continue;
+
+        // TTL expiry: request has been alive too long.
+        double age_ms = std::difftime(now, aq.created_at) * 1000.0;
+        if (age_ms > static_cast<double>(cfg_.request_ttl_ms)) {
+          std::cout << "[janitor] " << cfg_.node_id << " TTL expired "
+                    << req_id << " (age=" << age_ms << "ms)\n";
+          aq.cancelled = true;
+          to_cancel.push_back(req_id);
+          continue;
+        }
+
+        // Abandon timeout: gateway-only — client hasn't fetched in too long.
+        if (aq.parent_node.empty()) {  // gateway
+          double idle_ms = std::difftime(now, aq.last_activity) * 1000.0;
+          if (idle_ms > static_cast<double>(cfg_.abandon_timeout_ms)) {
+            std::cout << "[janitor] " << cfg_.node_id << " abandoned "
+                      << req_id << " (idle=" << idle_ms << "ms)\n";
+            aq.cancelled = true;
+            to_cancel.push_back(req_id);
+            continue;
+          }
+        }
+      }
+    }
+
+    // Propagate cancellation for each reaped request (without mutex).
+    for (const auto& req_id : to_cancel) {
+      scheduler_.cancel(req_id);
+      propagate_cancel_to_children(req_id);
+    }
+
+    // Garbage-collect completed+cancelled requests older than 2x TTL.
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      for (auto it = active_queries_.begin(); it != active_queries_.end();) {
+        const ActiveQuery& aq = it->second;
+        double age_ms = std::difftime(now, aq.created_at) * 1000.0;
+        bool fully_done = aq.cancelled ||
+                          (aq.local_done && aq.all_children_done());
+        if (fully_done && age_ms > static_cast<double>(cfg_.request_ttl_ms) * 2.0) {
+          std::cout << "[janitor] " << cfg_.node_id << " reaped "
+                    << it->first << "\n";
+          it = active_queries_.erase(it);
+        } else {
+          ++it;
+        }
+      }
+    }
+  }
 }
 
 }  // namespace mini2
