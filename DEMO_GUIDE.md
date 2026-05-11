@@ -92,17 +92,10 @@ ls /opt/homebrew/bin/grpc_cpp_plugin && echo "gRPC OK"
 
 ### 2.3 Dataset
 
-The full NYC 311 dataset must be partitioned. If `data/partitions/A.csv` through `I.csv` already exist, skip this.
-
-```bash
-# From the mini2 root directory:
-python3 scripts/partition_data.py
-```
-
-This reads `dataset/311_2020.csv` (12.7 GB) and produces 9 shard files in `data/partitions/`. Takes ~5-10 minutes.
+We are using a slimmed-down dataset (`data/partitions-small/`) for the live demo. This is highly recommended over the full 13GB dataset because it ensures lightning-fast queries during your 15-minute presentation and saves disk space on your teammate's MacBook.
 
 > [!NOTE]
-> Each shard is ~1.4 GB. You need ~15 GB free disk space for all partitions.
+> The `data/partitions-small/` folder is already committed to the repository. You do NOT need to run the partitioning script for the demo.
 
 ### 2.4 Build the C++ binary
 
@@ -322,21 +315,14 @@ bash scripts/build.sh
 # Generate Python stubs
 bash scripts/gen_python_stubs.sh
 
-# Partition dataset (needs dataset/311_2020.csv)
-python3 scripts/partition_data.py
-```
-
 > [!IMPORTANT]
-> The dataset file `dataset/311_2020.csv` (12.7 GB) must be on the teammate's MacBook too. Transfer it via USB drive or AirDrop — WiFi transfer of 12 GB will be slow.
+> The dataset is already included in the `data/partitions-small/` directory in the repository. You do not need to transfer the massive 13GB dataset!
 
 **Option B: Copy everything from your MacBook**
 ```bash
 # From your MacBook (m1) — copy entire project:
 rsync -avz --progress /path/to/mini2/ user@M2_IP:/path/to/mini2/
 ```
-
-> [!WARNING]
-> The `data/partitions/` folder is ~13 GB. Use a USB drive if WiFi is too slow.
 
 ### 4.4 Disable Firewalls
 
@@ -616,6 +602,42 @@ If you want to regenerate fresh:
 bash scripts/run_experiments.sh    # ~5 minutes
 python3 python/plot_experiments.py  # instant
 ```
+
+---
+
+### Scenario 6: Request Anticipation (LRU Cache) (30 seconds)
+
+**Purpose:** Show that redundant queries are anticipated and instantly returned from the LRU cache, bypassing the cluster entirely.
+
+```bash
+bash scripts/test_cache.sh
+```
+
+**What to explain:**
+- "We built an LRU cache into the Gateway (Node A) that keys on the serialized `QueryFilter` protobuf."
+- "The first run of the query takes normal time to traverse the cluster."
+- "The second run hits the cache and returns instantly in zero network hops."
+
+**Expected output:**
+You should see `PASS-1`, `PASS-2`, and `PASS-3` indicating that the cache was populated, a hit was registered, and the time was significantly faster.
+
+---
+
+### Scenario 7: Failure Recovery / Janitor Timeout (1 minute)
+
+**Purpose:** Show that if a physical node crashes mid-query, the gateway will not hang indefinitely.
+
+```bash
+bash scripts/test_partial.sh
+```
+
+**What to explain:**
+- "We added an artificial delay to Node B so it acts like it has crashed."
+- "The Janitor thread sweeping every 500ms detects that Node B missed its 30-second completion timeout."
+- "The gateway forcefully severs the branch, unblocks the query, and returns a `partial=true` response to the client with the ID of the timed-out node."
+
+**Expected output:**
+You should see the client log: `partial: timed_out_children=[B]`.
 
 ---
 

@@ -49,7 +49,7 @@ This document is your exact battle-plan for the live demonstration. It is struct
    `python3 python/fairness_test.py 192.168.1.10:50051 1000`
 
 **What you say:**
-> *"A major challenge was ensuring Fairness. If a massive query is executing, we cannot allow it to starve smaller requests. We implemented a custom Round-Robin Scheduler. In this script, we submit a massive query followed immediately by a tiny query. As you can see, our scheduler interleaves their chunk fetching, allowing the small query to finish instantly rather than waiting for the massive query to complete."*
+> *"A major challenge was fairness between concurrent requests. Large queries may produce thousands of result chunks, and if chunks are pushed greedily, one request can dominate the network and delay smaller requests. To address this, we implemented a custom round-robin scheduler at the chunk-dispatch stage. Instead of draining one request completely before serving another, each active request gets a turn to push one bounded chunk, which improves time-to-first-result and reduces starvation for smaller requests.."*
 
 > *"Furthermore, to minimize network overhead, our ChunkManager uses Adaptive Chunking. It dynamically sizes the payload byte-budgets on the fly depending on network pressure, saving roughly 80% on RPC roundtrips."*
 

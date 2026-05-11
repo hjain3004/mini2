@@ -140,6 +140,20 @@ received the query from (its \texttt{parent\_node}) as a downstream child,
 provided that neighbor does not appear in the accumulated
 \texttt{visited\_nodes} list.
 
+\subsection{Dataset Characteristics}
+
+The system is evaluated using the publicly available New York City 311 Service Requests dataset (2020), a real-world repository of municipal non-emergency requests. This dataset is uniquely suited for benchmarking distributed query architectures because it exhibits both uniform and highly skewed data distributions. The raw 2020 export comprises approximately 12.7\,GB of CSV data containing millions of records. 
+
+Key attributes queried by the engine include:
+\begin{itemize}
+    \item \texttt{unique\_key}: A high-cardinality, uniformly distributed primary identifier used for shard hashing.
+    \item \texttt{borough}: A low-cardinality categorical field (e.g., MANHATTAN, BROOKLYN) resulting in massive, multi-million record result sets that heavily stress the chunking subsystem and network bandwidth.
+    \item \texttt{complaint\_type}: A medium-cardinality categorical field useful for testing localized index selectivity.
+    \item \texttt{latitude} and \texttt{longitude}: Continuous spatial coordinates utilized to benchmark geographic bounding-box (\texttt{geo\_bbox}) queries.
+\end{itemize}
+
+By relying on authentic municipal data rather than synthetic distributions, the system's memory management, fairness scheduling, and payload adaptive limits are subjected to realistic, unpredictable query pressures.
+
 \subsection{Sharding}
 
 The NYC 311 dataset is partitioned by:
