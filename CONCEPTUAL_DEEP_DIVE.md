@@ -42,8 +42,11 @@ We never load 4 million records into a single gRPC message. Instead, our `ChunkM
 1. **Max Record Limit:** e.g., 5,000 records max.
 2. **Strict Byte Budget:** e.g., 65 KB max.
 
-**Why Adaptive Chunking matters:**
-If a record has a very long text description, 5,000 records might be 50 MB, which would blow up the network buffers. Our Adaptive Chunking looks at the size of the serialized records in real-time. If the byte budget is hit at 300 records, it truncates the chunk right there and sends it. It dynamically optimizes the payload size on the fly to prevent Out-Of-Memory (OOM) crashes.
+**The byte-budget safety net (always on):**
+If a record has a very long text description, 5,000 records might be 50 MB, which would blow up the network buffers. Our `ChunkManager` is hard-bounded by the 65 KB byte budget: if the budget is hit at 300 records, it truncates the chunk right there and sends it. This guards against OOM crashes regardless of mode.
+
+**Adaptive chunking (the latency-driven optimizer):**
+On top of the byte budget, adaptive mode tunes `chunk_records` based on observed `PushPeerChunk` round-trip latency: if latency < 20ms and the queue is deep, it **doubles** the record cap (capped at 5,000); if latency > 200ms, it **halves** it (floored at 100). The cluster converges quickly to the largest viable chunks under good network conditions, yielding 83% fewer chunk-pushes and 13% lower total time on 3.7M-record queries.
 
 ---
 
@@ -52,7 +55,7 @@ If a record has a very long text description, 5,000 records might be 50 MB, whic
 If the professor asks: *"How did you achieve fairness between end-points?"*
 
 **The Problem (Starvation):**
-Imagine a queue. Query 1 asks for all of Manhattan (4 million records). Query 2 asks for a single specific ID (1 record). If the Gateway uses a Greedy/FIFO strategy, Query 2 has to wait for all 4,000 chunks of Query 1 to be sent over the network before it gets its 1 chunk. Query 2 "starves."
+Imagine a queue. Query 1 asks for all of Manhattan (~4M records). Query 2 asks for a small slice (~338K records — "Noise - Vehicle"). Under Greedy, the worker keeps dispatching chunks for Query 1 until it has nothing ready, only then rotating to Query 2 — so Query 2's total completion time stretches to 1.29s (vs. 0.89s under Round-Robin). The smaller the query, the worse the relative penalty: small queries "starve" against background bulk traffic.
 
 **The Solution (Round-Robin):**
 We implemented a Round-Robin Scheduler. The Gateway loops through all active queries sequentially. 

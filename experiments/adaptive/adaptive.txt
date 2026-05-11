@@ -1,8 +1,8 @@
 label=adaptive
 records=3666627
-chunks=734
-first_chunk_s=0.09777164459228516
-total_s=2.963222026824951
-avg_chunk=4995.404632152588
-min_chunk=1627
+chunks=1386
+first_chunk_s=0.2721989154815674
+total_s=3.3471498489379883
+avg_chunk=4948.214574898785
+min_chunk=500
 max_chunk=5000

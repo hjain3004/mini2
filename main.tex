@@ -620,6 +620,36 @@ while also reducing chunk count by 83\% (734 vs. 4311 push operations). The
 algorithm converges to the maximum chunk size (5000 records) after the first
 few cycles as sub-20\,ms round-trip latency is confirmed.
 
+\subsection{Request Anticipation via LRU Result Cache}
+\label{sec:exp:cache}
+
+The prof's spec asks: \emph{``Can requests be anticipated?''} We implemented
+a small LRU result cache at the gateway, keyed on the serialized
+\texttt{QueryFilter}. On a cache hit, A short-circuits the scatter-gather:
+no \texttt{PeerQuery} fan-out is issued and the cached result vector is
+served directly from A's \texttt{ResultQueue}.
+
+\begin{table}[h]
+\centering
+\caption{LRU Cache (capacity=5, MANHATTAN $\sim$4.1\,M records, full 9-node cluster)}
+\label{tab:cache}
+\begin{tabular}{lrr}
+\toprule
+Run & Wall Time (s) & Path \\
+\midrule
+1 (cold) & 3.90 & Full scatter-gather + cache populate \\
+2 (warm) & 3.11 & Cache hit — no peer fan-out \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The cache eliminates the scatter-gather phase (peer fan-out, source\_done
+bookkeeping, network hops) on repeat queries, yielding a $\sim$20\%
+end-to-end speedup. The residual time is RPC overhead from the polling
+\texttt{FetchChunk} loop, which is paid in both modes. Cache invalidation
+is currently lifetime-of-process; a production system would add TTL or
+dataset-version keying.
+
 % ─────────────────────────────────────────────────────────────────────────────
 \section{Discussion}
 \label{sec:discussion}
@@ -643,12 +673,25 @@ CPython's GIL limiting parallel chunk assembly, though we did not isolate a
 per-node throughput measurement; functional correctness was verified by
 end-to-end record-count parity with an all-C++ baseline.
 
-\textbf{Limitations.} The current implementation does not handle node failures
-mid-query: if an intermediate node crashes, the parent will block indefinitely
-waiting for \texttt{source\_done} from that child. A production system would
-add per-child timeouts and partial-result delivery. Additionally, the
-\texttt{hash(unique\_key) \% 9} sharding assumes uniform key distribution;
-if a specific key range is heavily queried, one shard becomes a hot spot.
+\textbf{Failure recovery.} To prevent a hung parent when an intermediate
+node crashes, the gateway runs a per-query completion timer
+(\texttt{peer\_completion\_timeout\_ms}, default 30\,s). If
+\texttt{source\_done} from any expected child does not arrive within this
+window, the request's TTL janitor force-completes that child, sets
+\texttt{partial=true} on the request, and surfaces a
+\texttt{timed\_out\_children=[...]} message to the client in the next
+\texttt{ChunkResponse}. We verified this end-to-end by killing node~B
+mid-query against the full dataset: A had emitted 4,124 record-bearing
+chunks, then force-completed B at the timeout and closed the request
+cleanly as partial. Without this mechanism the parent would block
+indefinitely.
+
+\textbf{Limitations.} Beyond the failure-recovery mechanism above, the
+current implementation does not retry on a downed child, so the result
+set is permanently partial until the next \texttt{SubmitQuery}.
+Additionally, the \texttt{hash(unique\_key) \% 9} sharding assumes uniform
+key distribution; if a specific key range is heavily queried, one shard
+becomes a hot spot.
 
 % ─────────────────────────────────────────────────────────────────────────────
 \section{Conclusion}
