@@ -69,3 +69,7 @@ target_link_libraries(mini2_core PUBLIC mini2_proto)
 # ── Server binary ───────────────────────────────────────────────────────────
 add_executable(mini2_server cpp/src/main_server.cpp)
 target_link_libraries(mini2_server PRIVATE mini2_core)
+
+# ── Client binary ───────────────────────────────────────────────────────────
+add_executable(mini2_client cpp/src/main_client.cpp)
+target_link_libraries(mini2_client PRIVATE mini2_proto)

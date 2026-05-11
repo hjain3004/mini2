@@ -29,12 +29,25 @@ on top of "Recent activity"; checklist below.
 - [x] **10. Adaptive chunking** — flag-gated; tune via experiments.
 - [x] **11. Metrics + experiments** — run §20.{1,2,4,5} (chunk size,
   fairness, local-vs-distributed, linear-vs-indexed); plot.
-- [ ] **12. Two-machine demo** — finalize `tree-lan/` configs, run §22 demo.
-- [ ] **13. Report** — `report/mini2_report.md` per §24 structure.
+- [x] **12. Two-machine demo** — `config/tree-lan/` configs created; two-MacBook demo executed end-to-end per `DEMO_GUIDE.md` §4.
+- [x] **13. Report** — `main.tex` (IEEE conference format) + 4 figures in `report/figures/`; PDF in `mini2_report.pdf`.
 
 ---
 
 ## Recent Activity
+
+### Fix #4 & Fix #5 — LRU Cache & Failure Recovery · DONE
+
+**Date:** 2026-05-11
+
+**What landed:**
+- **Fix #5 (Failure Recovery):** Added `peer_completion_timeout_ms` to `ConfigManager` (default 30s). The janitor thread now actively checks if expected children have failed to report `source_done` within this timeout. If a child times out, it is force-completed and the `ActiveQuery` is marked as `partial=true`.
+- **Fix #5 (Client Surfacing):** When a client polls `FetchChunk` for a partially completed query, the server responds with a special message `partial: timed_out_children=[NODE_ID]`, explicitly informing the client that a subtree failed mid-query. Verified with `scripts/test_partial.sh`.
+- **Fix #4 (LRU Result Cache / Request Anticipation):** Added a thread-safe `LRUCache` to `Mini2ServiceImpl` (default capacity 5). The cache maps serialized `QueryFilter` protobufs to a `shared_ptr` of the aggregated result vector.
+- **Fix #4 (Cache Hit Path):** If `SubmitQuery` at the gateway (Node A) detects a cache hit, it instantly instantiates an `ActiveQuery` containing the cached results pointer, bypasses the local query, and skips fanning out to peers. `FetchChunk` serves the results directly from the `shared_ptr`.
+- **Fix #4 (Cache Miss Path):** When the gateway receives the final chunks from all peers and sets `local_done`, the aggregated result set is automatically pushed into the `LRUCache` for future anticipation. Verified with `scripts/test_cache.sh`.
+
+---
 
 ### Step 11 — Metrics + Experiments · DONE
 

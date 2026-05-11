@@ -139,11 +139,15 @@ def plot_local_vs_distributed():
 # ─── Experiment 4: Linear vs Indexed ─────────────────────────────────────────
 
 def plot_linear_vs_indexed():
-    path = os.path.join(ROOT, "experiments", "linear_vs_indexed", "results.csv")
+    # Prefer v2 (selective predicate, full dataset). Fall back to v1.
+    path_v2 = os.path.join(ROOT, "experiments", "linear_vs_indexed", "results_v2.csv")
+    path_v1 = os.path.join(ROOT, "experiments", "linear_vs_indexed", "results.csv")
+    path = path_v2 if os.path.exists(path_v2) else path_v1
     if not os.path.exists(path):
         print("  skipping linear_vs_indexed (no data)")
         return
     rows = load_csv(path)
+    is_v2 = path == path_v2
 
     idx_times = [float(r["total_ms"]) for r in rows if r["label"].startswith("indexed")]
     lin_times = [float(r["total_ms"]) for r in rows if r["label"].startswith("linear")]
@@ -153,7 +157,9 @@ def plot_linear_vs_indexed():
 
     means = [avg(idx_times), avg(lin_times)]
     colors = ["#10b981", "#ef4444"]
-    bars = ax.bar(["Indexed\n(borough index)", "Linear Scan\n(full table scan)"], means,
+    idx_label = ("Indexed\n(complaint_type idx)" if is_v2
+                 else "Indexed\n(borough index)")
+    bars = ax.bar([idx_label, "Linear Scan\n(full table scan)"], means,
                   color=colors, edgecolor="white", linewidth=1.5, width=0.5)
     for bar, val in zip(bars, means):
         ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 20,
@@ -167,7 +173,9 @@ def plot_linear_vs_indexed():
                 bbox=dict(boxstyle="round,pad=0.4", facecolor="#ecfdf5", edgecolor="#10b981"))
 
     ax.set_ylabel("Total Query Time (ms)")
-    ax.set_title("§20.5 — Indexed vs Linear Scan\n(A-only, borough=MANHATTAN, chunk_records=1000)")
+    title_pred = ('complaint_type="Noise - Helicopter", full dataset'
+                  if is_v2 else "borough=MANHATTAN")
+    ax.set_title(f"§20.5 — Indexed vs Linear Scan\n(A-only, {title_pred}, chunk_records=1000)")
     ax.set_ylim(0, max(means) * 1.25)
     plt.tight_layout()
     out = os.path.join(FIG_DIR, "linear_vs_indexed.png")

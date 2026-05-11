@@ -87,6 +87,8 @@ Config ConfigManager::load(const std::string& path) {
     else if (key == "peer_timeout_ms")       c.peer_timeout_ms = std::stoll(val);
     else if (key == "client_poll_timeout_ms") c.client_poll_timeout_ms = std::stoll(val);
     else if (key == "abandon_timeout_ms")    c.abandon_timeout_ms = std::stoll(val);
+    else if (key == "peer_completion_timeout_ms") c.peer_completion_timeout_ms = std::stoll(val);
+    else if (key == "peer_query_test_delay_ms") c.peer_query_test_delay_ms = std::stoll(val);
     else if (key == "metrics_output_path")   c.metrics_output_path = val;
     else {
       // Unknown key: tolerate to keep configs forward-compatible during dev.

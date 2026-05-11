@@ -820,8 +820,11 @@ bash scripts/kill_all.sh
 ### Testing
 
 ```bash
-# Basic query
+# Basic query (Python client)
 python3 python/client.py 127.0.0.1:50051 borough eq MANHATTAN 1000
+
+# Basic query (C++ client) — same RPC contract
+./build/mini2_client 127.0.0.1:50051 borough eq MANHATTAN 1000
 
 # Cancel test
 python3 python/cancel_test.py 127.0.0.1:50051 3

@@ -34,29 +34,42 @@ grpc::Status Mini2ServiceImpl::Heartbeat(grpc::ServerContext* /*context*/,
 
 // Try to emit source_done to our parent for `req_id`, once and only once.
 // Caller must NOT hold mutex_. Returns true if a source_done was sent.
-static bool emit_done_to_parent_locked_check(
-    std::mutex& mutex,
-    std::unordered_map<std::string, ActiveQuery>& active_queries,
-    const std::string& req_id,
-    std::string& out_parent_node) {
-  std::lock_guard<std::mutex> lock(mutex);
-  auto it = active_queries.find(req_id);
-  if (it == active_queries.end()) return false;
-  ActiveQuery& aq = it->second;
-  if (aq.parent_done_sent) return false;
-  if (aq.parent_node.empty()) return false;       // gateway, no parent
-  if (!aq.local_done) return false;
-  if (!aq.all_children_done()) return false;
-  aq.parent_done_sent = true;
-  out_parent_node = aq.parent_node;
-  return true;
-}
-
 void Mini2ServiceImpl::try_emit_done_to_parent(const std::string& req_id) {
   std::string parent_node;
-  if (!emit_done_to_parent_locked_check(mutex_, active_queries_, req_id, parent_node)) {
+  bool is_gateway = false;
+  std::string cache_key;
+  std::shared_ptr<std::vector<ServiceRecord>> results;
+
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = active_queries_.find(req_id);
+    if (it == active_queries_.end()) return;
+    ActiveQuery& aq = it->second;
+    if (aq.parent_done_sent) return;
+    if (!aq.local_done) return;
+    if (!aq.all_children_done()) return;
+
+    aq.parent_done_sent = true;
+    
+    if (aq.parent_node.empty()) {
+      is_gateway = true;
+      cache_key = aq.cache_key;
+      results = aq.results;
+    } else {
+      parent_node = aq.parent_node;
+    }
+  }
+
+  // Gateway cache population
+  if (is_gateway) {
+    if (!cache_key.empty() && results) {
+       result_cache_.put(cache_key, results);
+       std::cout << "[cache] " << cfg_.node_id << " CACHE POPULATED for " << cache_key 
+                 << " (" << results->size() << " records)\n";
+    }
     return;
   }
+
   auto stub = client_pool_.get_stub(parent_node);
   if (!stub) return;
 
@@ -98,26 +111,53 @@ grpc::Status Mini2ServiceImpl::SubmitQuery(grpc::ServerContext* /*context*/,
                                            const QueryRequest* request,
                                            QueryAccepted* reply) {
   std::string req_id = generate_request_id();
-  std::cout << "[query] " << cfg_.node_id << " received query " << req_id
-            << " from " << request->client_id() << "\n";
+  auto now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
 
-  // Run the local query synchronously (gateway only — workers do this in PeerQuery thread).
-  bool force_linear = request->force_linear_scan();
-  std::vector<ServiceRecord> results = query_engine_.run(request->filter(), force_linear);
+  // Fix #4: LRU Result Cache (Request Anticipation)
+  std::string cache_key = request->filter().SerializeAsString();
 
-  time_t now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+  auto cached_results = result_cache_.get(cache_key);
+  if (cached_results) {
+    ActiveQuery aq;
+    aq.request_id = req_id;
+    aq.client_id = request->client_id();
+    aq.results = cached_results;
+    aq.cache_key = cache_key;
+    aq.local_done = true;
+    aq.created_at = now;
+    aq.last_activity = aq.created_at;
+    aq.parent_node = "";
+
+    std::cout << "[cache] " << cfg_.node_id << " CACHE HIT for " << cache_key 
+              << " (" << cached_results->size() << " records)\n";
+
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      active_queries_[req_id] = std::move(aq);
+    }
+    reply->set_request_id(req_id);
+    reply->set_accepted(true);
+    reply->set_message("accepted (cache hit)");
+    return grpc::Status::OK;
+  }
 
   ActiveQuery aq;
   aq.request_id = req_id;
   aq.client_id = request->client_id();
-  aq.results = std::move(results);
-  aq.last_activity = now;
+  aq.cache_key = cache_key;
   aq.created_at = now;
+  aq.last_activity = now;
   aq.local_done = true;
   aq.parent_node = "";  // gateway has no parent
+  aq.results = std::make_shared<std::vector<ServiceRecord>>();
   for (const auto& neighbor : cfg_.neighbors) {
     aq.expected_children.push_back(neighbor.id);
   }
+
+  // Run the local query synchronously (gateway only — workers do this in PeerQuery thread).
+  bool force_linear = request->force_linear_scan();
+  std::vector<ServiceRecord> results = query_engine_.run(request->filter(), force_linear);
+  *aq.results = std::move(results);
 
   {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -192,12 +232,12 @@ grpc::Status Mini2ServiceImpl::FetchChunk(grpc::ServerContext* /*context*/,
     return grpc::Status::OK;
   }
 
-  size_t available = aq.results.size() - aq.fetched_count;
+  size_t available = aq.results->size() - aq.fetched_count;
   int records_to_send = 0;
   if (available > 0) {
     records_to_send = std::min(static_cast<size_t>(request->max_records()), available);
     for (int i = 0; i < records_to_send; ++i) {
-      *reply->add_records() = aq.results[aq.fetched_count + i].to_proto();
+      *reply->add_records() = (*aq.results)[aq.fetched_count + i].to_proto();
     }
     aq.fetched_count += records_to_send;
     available -= records_to_send;
@@ -205,6 +245,18 @@ grpc::Status Mini2ServiceImpl::FetchChunk(grpc::ServerContext* /*context*/,
 
   reply->set_done(available == 0 && aq.local_done && aq.all_children_done());
   reply->set_cancelled(false);
+
+  // Fix #5: surface partial-result indication when one or more subtrees
+  // were force-completed by the peer-completion janitor.
+  if (aq.partial) {
+    std::string msg = "partial: timed_out_children=[";
+    for (size_t i = 0; i < aq.timed_out_children.size(); ++i) {
+      if (i) msg += ",";
+      msg += aq.timed_out_children[i];
+    }
+    msg += "]";
+    reply->set_message(msg);
+  }
 
   std::cout << "[query] " << cfg_.node_id << " sending chunk "
             << reply->chunk_id() << " for " << aq.request_id
@@ -368,6 +420,13 @@ grpc::Status Mini2ServiceImpl::PeerQuery(grpc::ServerContext* /*context*/,
 }
 
 void Mini2ServiceImpl::on_scheduler_local_done(const std::string& req_id) {
+  // Test-only knob: simulate a slow/hung node by delaying local_done.
+  if (cfg_.peer_query_test_delay_ms > 0) {
+    std::cout << "[test] " << cfg_.node_id << " peer_query_test_delay_ms="
+              << cfg_.peer_query_test_delay_ms << " active for " << req_id << "\n";
+    std::this_thread::sleep_for(
+        std::chrono::milliseconds(cfg_.peer_query_test_delay_ms));
+  }
   {
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = active_queries_.find(req_id);
@@ -404,9 +463,9 @@ grpc::Status Mini2ServiceImpl::PushPeerChunk(grpc::ServerContext* /*context*/,
       aq.last_activity = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
       if (aq.parent_node.empty()) {
         mode = Mode::Gateway;
-        // Append records into our queue (we're A, the gateway).
+        // Gateway: accumulate results for client.
         for (const auto& rec : request->records()) {
-          aq.results.push_back(ServiceRecord::from_proto(rec));
+          aq.results->push_back(ServiceRecord::from_proto(rec));
         }
       } else {
         mode = Mode::Intermediate;
@@ -544,10 +603,37 @@ void Mini2ServiceImpl::run_janitor(const std::atomic<bool>& shutdown) {
 
     // Collect request_ids that need reaping.
     std::vector<std::string> to_cancel;
+    // Fix #5: requests that had a child timed-out (force-completed); we
+    // need to retry emitting source_done to the parent outside the lock.
+    std::vector<std::string> timed_out_to_recheck;
     {
       std::lock_guard<std::mutex> lock(mutex_);
       for (auto& [req_id, aq] : active_queries_) {
         if (aq.cancelled) continue;
+
+        // Fix #5: per-query child completion timeout — force-complete any
+        // expected children that have not reported source_done in time.
+        double age_ms_for_timeout =
+            std::difftime(now, aq.created_at) * 1000.0;
+        if (!aq.all_children_done() &&
+            age_ms_for_timeout > static_cast<double>(cfg_.peer_completion_timeout_ms)) {
+          for (const auto& child : aq.expected_children) {
+            bool already = false;
+            for (const auto& c : aq.completed_children) {
+              if (c == child) { already = true; break; }
+            }
+            if (already) continue;
+            aq.completed_children.push_back(child);
+            aq.timed_out_children.push_back(child);
+            aq.partial = true;
+            std::cout << "[janitor] " << cfg_.node_id
+                      << " peer-completion-timeout: force-completing child "
+                      << child << " for " << req_id << " (age="
+                      << age_ms_for_timeout << "ms)\n";
+          }
+          timed_out_to_recheck.push_back(req_id);
+          // Don't `continue` — we still want the TTL/abandon checks below.
+        }
 
         // TTL expiry: request has been alive too long.
         double age_ms = std::difftime(now, aq.created_at) * 1000.0;
@@ -577,6 +663,13 @@ void Mini2ServiceImpl::run_janitor(const std::atomic<bool>& shutdown) {
     for (const auto& req_id : to_cancel) {
       scheduler_.cancel(req_id);
       propagate_cancel_to_children(req_id);
+    }
+
+    // Fix #5: re-check completion for any request that had a child
+    // force-completed. If this node is non-gateway and is now fully done,
+    // emit source_done upward.
+    for (const auto& req_id : timed_out_to_recheck) {
+      try_emit_done_to_parent(req_id);
     }
 
     // Garbage-collect completed+cancelled requests older than 2x TTL.

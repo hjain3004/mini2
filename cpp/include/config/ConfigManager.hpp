@@ -42,6 +42,13 @@ struct Config {
   int64_t peer_timeout_ms       = 3000;
   int64_t client_poll_timeout_ms = 1000;
   int64_t abandon_timeout_ms    = 15000;
+  // Step 14 (Fix #5): if a forwarded child hasn't returned source_done within
+  // this many ms after the request was registered, the parent force-completes
+  // it and serves the result as `partial=true` to the client.
+  int64_t peer_completion_timeout_ms = 30000;
+  // Test-only: artificially delay this node's source_done emission by this
+  // many ms, to exercise the parent's peer_completion_timeout path. 0 = off.
+  int64_t peer_query_test_delay_ms = 0;
 
   // metrics
   std::string metrics_output_path;
