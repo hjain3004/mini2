@@ -18,6 +18,7 @@
 
 // ─── Global shutdown flag ───────────────────────────────────────────────────
 
+// Main server implementation for mini2 distributed query system
 static std::atomic<bool> g_shutdown{false};
 
 static void signal_handler(int /*sig*/) {
