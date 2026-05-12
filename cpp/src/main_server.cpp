@@ -88,6 +88,8 @@ int main(int argc, char** argv) {
   try {
     auto cfg = mini2::ConfigManager::load(argv[1]);
 
+    std::cout << "[mini2_server] Configuration loaded successfully for node " << cfg.node_id << "\n";
+
     std::cout << "[mini2_server] node_id=" << cfg.node_id
               << " role=" << cfg.role
               << " host=" << cfg.host
