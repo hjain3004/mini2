@@ -29,6 +29,7 @@ static void signal_handler(int /*sig*/) {
 
 static void heartbeat_loop(const mini2::Config& cfg,
                            mini2::GrpcClientPool& pool) {
+  std::cout << "[heartbeat] Starting heartbeat loop for node " << cfg.node_id << "\n";
   while (!g_shutdown.load()) {
     auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
                    std::chrono::system_clock::now().time_since_epoch())
